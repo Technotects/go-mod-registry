@@ -133,6 +133,63 @@ func TestRegisterWithPingCallback(t *testing.T) {
 	assert.True(t, receivedPing, "Never received health check ping")
 }
 
+func TestRegisterCustomWithPingCallback(t *testing.T) {
+	doneChan := make(chan bool)
+	receivedPing := false
+
+	route := "/test/route"
+
+	// Setup a server to simulate the service for the health check callback
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.Contains(request.URL.Path, route) {
+
+			switch request.Method {
+			case "GET":
+				receivedPing = true
+
+				writer.Header().Set("Content-Type", "text/plain")
+				_, _ = writer.Write([]byte("pong"))
+
+				doneChan <- true
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Figure out which port the simulated service is running on.
+	serverUrl, _ := url.Parse(server.URL)
+	serverPort, _ := strconv.Atoi(serverUrl.Port())
+
+	client := makeConsulClient(t, getUniqueServiceName(), serverPort, true)
+	// Make sure service is not already registered.
+	_ = client.consulClient.Agent().ServiceDeregister(client.serviceKey)
+	_ = client.consulClient.Agent().CheckDeregister(client.serviceKey)
+
+	// Try to clean-up after test
+	defer func(client *consulClient) {
+		_ = client.consulClient.Agent().ServiceDeregister(client.serviceKey)
+		_ = client.consulClient.Agent().CheckDeregister(client.serviceKey)
+	}(client)
+
+	id := "check-id"
+	name := "check-name"
+
+	// Register the service endpoint and health check callback
+	err := client.RegisterCheck(id, name, "", route, "5s")
+
+	if !assert.NoError(t, err) {
+		t.Fatal()
+	}
+
+	go func() {
+		time.Sleep(10 * time.Second)
+		doneChan <- false
+	}()
+
+	<-doneChan
+	assert.True(t, receivedPing, "Never received health check ping")
+}
+
 func TestUnregister(t *testing.T) {
 	client := makeConsulClient(t, getUniqueServiceName(), defaultServicePort, true)
 
@@ -142,6 +199,42 @@ func TestUnregister(t *testing.T) {
 
 	err := client.Register()
 	if !assert.NoError(t, err, "Error registering service") {
+		t.Fatal()
+	}
+
+	err = client.Unregister()
+	if !assert.NoError(t, err, "Error un-registering service") {
+		t.Fatal()
+	}
+
+	_, err = client.GetServiceEndpoint(client.serviceKey)
+	if !assert.Error(t, err, "Expected error getting service endpoint") {
+		t.Fatal()
+	}
+}
+
+func TestUnregisterCheck(t *testing.T) {
+	client := makeConsulClient(t, getUniqueServiceName(), defaultServicePort, true)
+
+	id := "check-id"
+
+	// Make sure service is not already registered.
+	_ = client.consulClient.Agent().ServiceDeregister(client.serviceKey)
+	_ = client.consulClient.Agent().CheckDeregister(client.serviceKey)
+	_ = client.consulClient.Agent().CheckDeregister(id)
+
+	err := client.RegisterCheck(id, "", "", "", "15s")
+	if !assert.NoError(t, err, "Error registering check") {
+		t.Fatal()
+	}
+
+	err = client.UnregisterCheck(id)
+	if !assert.NoError(t, err, "Error un-registering check") {
+		t.Fatal()
+	}
+
+	err = client.UnregisterCheck("test")
+	if !assert.Error(t, err, "Error un-registering check") {
 		t.Fatal()
 	}
 
